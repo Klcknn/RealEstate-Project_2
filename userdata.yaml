@@ -1,0 +1,140 @@
+---
+- name: Setup and Update System - Install Docker, Docker-Compose and Jenkins
+  hosts: webservers
+  become: true
+  gather_facts: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Update All (Debian/Ubuntu) Packages to Their Latest Version
+      dnf:
+        name: "*"
+        state: latest
+    
+    - name: Install Required Packages
+      yum:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - yum-utils
+        - device-mapper-persistent-data
+        - lvm2
+        - java
+        - maven
+        - git
+        - awscli
+        - ansible
+        - nodejs
+        - npm
+        - wget  
+
+    # - name: Install java-11-amazon-corretto
+    #   command: dnf install java-11-amazon-corretto -y
+      
+    - name: Add Docker Repository
+      ini_file:
+        path: /etc/yum.repos.d/docker-ce.repo
+        section: docker-ce-stable
+        option: baseurl
+        value: https://download.docker.com/linux/centos/7/$basearch/stable
+        create: yes
+
+    - name: Add gpgkey to Docker Repository
+      ini_file:
+        path: /etc/yum.repos.d/docker-ce.repo
+        section: docker-ce-stable
+        option: gpgkey
+        value: https://download.docker.com/linux/centos/gpg
+        create: yes
+
+    - name: Install Docker
+      yum:
+        name: docker-ce
+        state: present
+
+    - name: Add ec2-user to the docker group
+      user:
+      # name: "{{ ansible_user }}"
+        name: ec2-user
+        groups: docker
+        append: yes
+      
+    - name: Add jenkins to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    - name: Start and Enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+    
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Install Docker Compose
+      command: "{{ item }}"
+      loop:
+        - curl -SL https://github.com/docker/compose/releases/download/v2.17.3/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+        - chmod +x /usr/local/bin/docker-compose
+    
+    # Install Jenkins
+    - name: Import Jenkins GPG Key
+      rpm_key:
+        key: "https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key"
+
+    - name: Add Jenkins Repository
+      yum_repository:
+        name: jenkins
+        description: Jenkins
+        baseurl: https://pkg.jenkins.io/redhat-stable
+        gpgcheck: yes
+        gpgkey: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+        enabled: yes
+
+    - name: Install Jenkins
+      yum:
+        name: jenkins
+        state: present
+
+    - name: Start and Enable Jenkins Service
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Wait for Jenkins to Start
+      wait_for:
+        port: 8080
+        timeout: 60
+
+    - name: Show Us Jenkins initial Admin Password
+      command: cat /var/lib/jenkins/secrets/initialAdminPassword
+      register: initial_password
+
+    - name: Display Initial Admin Password
+      debug:
+        var: initial_password.stdout_lines
+
+    - name: Show Us Maven Home Path
+      command: "which mvn"
+      register: maven_home
+
+    - name: Show Us Java Home Path
+      command: "which java"
+      register: java_home
+
+    - name: Show Us Git Executable Path
+      command: "which git"
+      register: git_path
+    
+    - name: Display Installed Packages Paths
+      debug:
+        msg: |
+          Maven Home: {{ maven_home.stdout }}
+          Java Home: {{ java_home.stdout }}
+          Git Path:  {{ git_path.stdout }}
+        

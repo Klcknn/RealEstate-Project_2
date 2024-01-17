@@ -1,0 +1,157 @@
+pipeline {
+    agent any
+    environment {
+        PATH=sh(script:"echo $PATH:/usr/local/bin", returnStdout:true).trim()
+        AWS_REGION = "us-east-1"
+        AWS_ACCOUNT_ID=sh(script:'export PATH="$PATH:/usr/local/bin" && aws sts get-caller-identity --query Account --output text', returnStdout:true).trim()
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        GITHUB_REPO_NAME_MAIN = "jenkins-docker-terraform-ecrec"
+        GITHUB_REPO_NAME_FRONTEND = "prettierHome-frontend-dev"
+        GITHUB_REPO_NAME_BACKEND  = "prettierHome-backend-dev"
+        IMAGE_REPO_NAME_FRONTEND  = "frontend"
+        IMAGE_REPO_NAME_BACKEND   = "backend"
+        ECR_REPO_URL_FRONTEND = "${ECR_REGISTRY}/${IMAGE_REPO_NAME_FRONTEND}:${IMAGE_TAG}"
+        ECR_REPO_URL_BACKEND  = "${ECR_REGISTRY}/${IMAGE_REPO_NAME_BACKEND}:${IMAGE_TAG}"
+        DOCKER_COMPOSE_FILE = "/var/lib/jenkins/workspace/new_pipeline/${GITHUB_REPO_NAME_MAIN}/docker-compose.yaml"
+        IMAGE_TAG="latest"
+    }
+
+    stages {
+        stage('Delete Previously Cloned Folder from Github Repo') {
+            steps {
+                script {
+                    def folder_path = "/var/lib/jenkins/workspace/new_pipeline/${GITHUB_REPO_NAME_MAIN}" 
+                    sh "rm -rf ${folder_path}"
+                    echo "Mevcut clone etmiş olduğumuz '$folder_path' klasörü silindi..."
+                }
+            }
+        } 
+
+        stage("Clone Githup Project Repo") {
+            steps {
+                script {
+                    withCredentials([ 
+                        string(credentialsId:"github_user", variable: "Github_User"), 
+                        string(credentialsId:"github_token", variable: "Github_Token") 
+                    ]){
+                        sh "git clone https://$Github_User:$Github_Token@github.com/Klcknn/jenkins-docker-terraform-ecrec.git"
+                    }
+                }
+            }
+        } 
+
+        stage('Check ECR Repo Existence') {
+            steps {
+                script {
+                    def ecrRepoExists = sh(script: "aws ecr describe-repositories --repository-names ${IMAGE_REPO_NAME_FRONTEND}", returnStatus: true) == 0
+                    def ecrRepoExists_2 = sh(script: "aws ecr describe-repositories --repository-names ${IMAGE_REPO_NAME_FRONTEND}", returnStatus: true) == 0
+                    if (ecrRepoExists && ecrRepoExists_2) {
+                        sh "aws ecr delete-repository --repository-name ${IMAGE_REPO_NAME_FRONTEND} --force"
+                        echo "ECR Repo '${IMAGE_REPO_NAME_FRONTEND}' başarıyla silindi."
+                        sh "aws ecr delete-repository --repository-name ${IMAGE_REPO_NAME_BACKEND} --force"
+                        echo "ECR Repo '${IMAGE_REPO_NAME_BACKEND}' başarıyla silindi."
+                    } 
+                }
+            }
+        }
+
+        stage("Create Two ECR Repo") {
+            steps {
+                echo "Creating ECR Repo for Frontend"
+                sh """
+                aws ecr create-repository \
+                  --repository-name ${IMAGE_REPO_NAME_FRONTEND} \
+                  --image-scanning-configuration scanOnPush=false \
+                  --image-tag-mutability MUTABLE \
+                  --region ${AWS_REGION}
+                aws ecr create-repository \
+                  --repository-name ${IMAGE_REPO_NAME_BACKEND} \
+                  --image-scanning-configuration scanOnPush=false \
+                  --image-tag-mutability MUTABLE \
+                  --region ${AWS_REGION}
+                """
+            }
+        }
+
+        stage("Build and Push Frontend Image to ECR Repo") {
+            steps {
+                script {
+                    withCredentials([ 
+                        string(credentialsId:"aws_acces_key",  variable: "Aws_Acces_Key"), 
+                        string(credentialsId:"aws_secret_key", variable: "Aws_Secret_Key") 
+                    ]){   
+                        sh """
+                            echo "Building and Pushing Frontend Image to ECR Repo"
+                            aws configure set aws_access_key_id ${Aws_Acces_Key}
+                            aws configure set aws_secret_access_key ${Aws_Secret_Key}
+                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} 
+                            cd ${GITHUB_REPO_NAME_MAIN}/${GITHUB_REPO_NAME_FRONTEND}
+                            docker build . -t ${IMAGE_REPO_NAME_FRONTEND}:${IMAGE_TAG}
+                            docker tag ${IMAGE_REPO_NAME_FRONTEND}:${IMAGE_TAG} ${ECR_REGISTRY}/${IMAGE_REPO_NAME_FRONTEND}:${IMAGE_TAG}
+                            docker push ${ECR_REGISTRY}/${IMAGE_REPO_NAME_FRONTEND}:${IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }      
+
+        stage("Build and Push Backend Image to ECR Repo") {
+            steps {
+                script {
+                    withCredentials([ 
+                        string(credentialsId:"aws_acces_key",  variable: "Aws_Acces_Key"), 
+                        string(credentialsId:"aws_secret_key", variable: "Aws_Secret_Key") 
+                    ]){
+                        sh """
+                            echo "Building and Pushing Backend Image to ECR Repo"
+                            aws configure set aws_access_key_id ${Aws_Acces_Key}
+                            aws configure set aws_secret_access_key ${Aws_Secret_Key} 
+                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} 
+                            cd ${GITHUB_REPO_NAME_MAIN}/${GITHUB_REPO_NAME_BACKEND}
+                            docker build . -t ${IMAGE_REPO_NAME_BACKEND}:${IMAGE_TAG}
+                            docker tag ${IMAGE_REPO_NAME_BACKEND}:${IMAGE_TAG} ${ECR_REGISTRY}/${IMAGE_REPO_NAME_BACKEND}:${IMAGE_TAG}
+                            docker push ${ECR_REGISTRY}/${IMAGE_REPO_NAME_BACKEND}:${IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage("Pull Docker Image (Frontend and Backend) from ECR") {
+            steps {
+                script {
+                    sh ''' 
+                    
+                      cd ${GITHUB_REPO_NAME_MAIN}
+                      echo "Pulling Two Docker Image from ECR"
+                      docker pull ${ECR_REPO_URL_FRONTEND}
+                      docker pull ${ECR_REPO_URL_BACKEND}
+                      echo "Docker images are stored in: $(pwd)"     
+                      '''
+                }
+            }
+        }
+
+        stage("Run Container with Docker Compose") {
+            steps {
+                script {
+                    sh '''
+                        sudo mkdir /sys/fs/cgroup/systemd
+                        sudo mount -t cgroup -o none,name=systemd cgroup /sys/fs/cgroup/systemd
+                        docker-compose -f ${DOCKER_COMPOSE_FILE} up -d 
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline successfully executed!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
+
